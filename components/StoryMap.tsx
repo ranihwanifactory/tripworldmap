@@ -20,12 +20,12 @@ L.Marker.prototype.options.icon = DefaultIcon;
 
 const VehicleIcon = ({ mode, rotation }: { mode: TransportMode; rotation: number }) => {
     return L.divIcon({
-        html: `<div style="transform: rotate(${rotation}deg); background: white; padding: 6px; border-radius: 50%; box-shadow: 0 4px 6px rgba(0,0,0,0.3); display: flex; align-items: center; justify-content: center;">
-             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#4F46E5" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${getIconSvg(mode)}</svg>
+        html: `<div style="transform: rotate(${rotation}deg); background: #4F46E5; padding: 8px; border-radius: 50%; box-shadow: 0 4px 10px rgba(0,0,0,0.5); border: 2px solid white; display: flex; align-items: center; justify-content: center;">
+             <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">${getIconSvg(mode)}</svg>
         </div>`,
         className: 'custom-vehicle-icon',
-        iconSize: [36, 36],
-        iconAnchor: [18, 18]
+        iconSize: [44, 44],
+        iconAnchor: [22, 22]
     });
 };
 
@@ -50,7 +50,7 @@ interface StoryMapProps {
 const MapController = ({ center, zoom }: { center: [number, number], zoom: number }) => {
     const map = useMap();
     useEffect(() => {
-        map.flyTo(center, zoom, { duration: 1.5, easeLinearity: 0.25 });
+        map.flyTo(center, zoom, { duration: 1.0, easeLinearity: 0.5 });
     }, [center, zoom, map]);
     return null;
 };
@@ -87,15 +87,10 @@ const StoryMap: React.FC<StoryMapProps> = ({ trip, stops, onBack }) => {
             for (let i = 0; i < cards.length; i++) {
                 const card = cards[i];
                 const rect = card.getBoundingClientRect();
-                const cardCenter = rect.top + rect.height / 2;
                 const viewCenter = containerHeight / 2;
 
                 // Check if this card is roughly in view
-                // We define the "active zone" as when the card is near the center
-                // But for interpolation, we need to know WHERE we are between i and i+1
-                
-                // Logic: A segment starts when card i is at center, and ends when card i+1 is at center.
-                // Distance between centers:
+                // We interpolate between current card i and next card i+1 based on scroll position
                 
                 if (i < cards.length - 1) {
                     const nextCard = cards[i+1];
@@ -104,7 +99,10 @@ const StoryMap: React.FC<StoryMapProps> = ({ trip, stops, onBack }) => {
                     const currentCenter = rect.top + rect.height / 2;
                     const nextCenter = nextRect.top + nextRect.height / 2;
                     
-                    // If the view center is between these two cards
+                    // Logic: As we scroll down, content moves up.
+                    // When 'currentCenter' is near 'viewCenter', we are at stop i.
+                    // As 'currentCenter' moves up (decreases) and 'nextCenter' approaches 'viewCenter', we move to i+1.
+                    
                     if (viewCenter >= currentCenter && viewCenter < nextCenter) {
                         foundActive = true;
                         setActiveStopIndex(i);
@@ -127,30 +125,28 @@ const StoryMap: React.FC<StoryMapProps> = ({ trip, stops, onBack }) => {
                         // Calculate Rotation
                         const dy = endLat - startLat;
                         const dx = endLng - startLng;
-                        // Simple angle calc (accurate enough for short distances, otherwise need bearing)
                         const angle = Math.atan2(dx, dy) * (180 / Math.PI);
                         setVehicleRotation(angle);
 
-                        // Use the transport mode of the destination (how we got there) or origin?
-                        // Usually "Transport Mode" in data is "How I arrived HERE". 
-                        // So traveling from i to i+1 implies using mode of i+1.
+                        // Use the transport mode of the next segment
                         setActiveTransportMode(sortedStops[i+1].transportMode);
                         break;
                     }
                 }
             }
             
-            // Handle last card case (clamping)
+            // Handle limits
             if (!foundActive && cards.length > 0) {
                  const lastIdx = cards.length - 1;
-                 const lastCard = cards[lastIdx];
-                 const rect = lastCard.getBoundingClientRect();
-                 if (rect.top + rect.height / 2 <= containerHeight / 2) {
-                     // We are past the last card
+                 const firstCardRect = cards[0].getBoundingClientRect();
+                 const lastCardRect = cards[lastIdx].getBoundingClientRect();
+                 
+                 if (lastCardRect.top + lastCardRect.height / 2 <= containerHeight / 2) {
+                     // Past the end
                      setActiveStopIndex(lastIdx);
                      setVehiclePos([sortedStops[lastIdx].coordinates.lat, sortedStops[lastIdx].coordinates.lng]);
-                 } else if (cards[0].getBoundingClientRect().top > containerHeight / 2) {
-                     // We are before the first card
+                 } else if (firstCardRect.top > containerHeight / 2) {
+                     // Before the start
                      setActiveStopIndex(0);
                      setVehiclePos([sortedStops[0].coordinates.lat, sortedStops[0].coordinates.lng]);
                  }
@@ -178,6 +174,9 @@ const StoryMap: React.FC<StoryMapProps> = ({ trip, stops, onBack }) => {
                     zoom={13} 
                     style={{ height: '100%', width: '100%' }}
                     zoomControl={false}
+                    scrollWheelZoom={false}
+                    dragging={false}
+                    doubleClickZoom={false}
                 >
                     <TileLayer
                         attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
@@ -187,7 +186,7 @@ const StoryMap: React.FC<StoryMapProps> = ({ trip, stops, onBack }) => {
                     {/* Path Line */}
                     <Polyline 
                         positions={sortedStops.map(s => [s.coordinates.lat, s.coordinates.lng])}
-                        pathOptions={{ color: '#4F46E5', weight: 4, opacity: 0.6, dashArray: '10, 10' }}
+                        pathOptions={{ color: '#6366f1', weight: 4, opacity: 0.6, dashArray: '10, 10' }}
                     />
 
                     {/* All Markers (Past stops) */}
@@ -195,7 +194,7 @@ const StoryMap: React.FC<StoryMapProps> = ({ trip, stops, onBack }) => {
                         <Marker 
                             key={stop.id} 
                             position={[stop.coordinates.lat, stop.coordinates.lng]}
-                            opacity={0.6}
+                            opacity={idx === activeStopIndex ? 1 : 0.6}
                         />
                     ))}
 
@@ -209,7 +208,7 @@ const StoryMap: React.FC<StoryMapProps> = ({ trip, stops, onBack }) => {
                     )}
 
                     {/* Smooth pan to current vehicle position or stop */}
-                    <MapController center={vehiclePos || [currentStop.coordinates.lat, currentStop.coordinates.lng]} zoom={13} />
+                    <MapController center={vehiclePos || [currentStop.coordinates.lat, currentStop.coordinates.lng]} zoom={14} />
                 </MapContainer>
             </div>
 
@@ -248,7 +247,7 @@ const StoryMap: React.FC<StoryMapProps> = ({ trip, stops, onBack }) => {
                         <div className={`
                             w-full max-w-md bg-white/95 backdrop-blur-md rounded-3xl shadow-2xl overflow-hidden
                             transition-all duration-500 transform
-                            ${index === activeStopIndex ? 'scale-100 opacity-100' : 'scale-95 opacity-50'}
+                            ${index === activeStopIndex ? 'scale-100 opacity-100 ring-4 ring-indigo-500/20' : 'scale-95 opacity-50'}
                         `}>
                             {stop.imageUrl && (
                                 <div className="h-56 w-full overflow-hidden relative">
