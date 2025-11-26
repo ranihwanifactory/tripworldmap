@@ -1,19 +1,24 @@
 import React, { useState, useEffect } from 'react';
 import { auth, db } from './firebase';
 import { onAuthStateChanged, signOut, User } from 'firebase/auth';
-import { collection, query, where, getDocs, orderBy } from 'firebase/firestore';
+import { collection, query, where, getDocs, deleteDoc, doc } from 'firebase/firestore';
 import Auth from './components/Auth';
 import TripEditor from './components/TripEditor';
 import StoryMap from './components/StoryMap';
 import { Trip, TravelStop } from './types';
-import { Plus, Map as MapIcon, LogOut, Loader2 } from 'lucide-react';
+import { Plus, Map as MapIcon, LogOut, Loader2, Trash2, Edit } from 'lucide-react';
 
 function App() {
   const [user, setUser] = useState<User | null>(null);
   const [view, setView] = useState<'DASHBOARD' | 'EDITOR' | 'STORY'>('DASHBOARD');
   const [trips, setTrips] = useState<Trip[]>([]);
+  
+  // State for Selection
   const [selectedTrip, setSelectedTrip] = useState<Trip | null>(null);
   const [selectedStops, setSelectedStops] = useState<TravelStop[]>([]);
+  
+  // State specifically for Editing
+  const [isEditing, setIsEditing] = useState(false);
   const [loading, setLoading] = useState(true);
 
   // Auth Listener
@@ -35,6 +40,8 @@ function App() {
       const q = query(collection(db, "trips"), where("userId", "==", uid));
       const querySnapshot = await getDocs(q);
       const fetchedTrips = querySnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Trip));
+      // Sort client side by createdAt desc
+      fetchedTrips.sort((a,b) => b.createdAt.seconds - a.createdAt.seconds);
       setTrips(fetchedTrips);
     } catch (e) {
       console.error("Fetch error", e);
@@ -43,13 +50,16 @@ function App() {
     }
   };
 
+  const getTripStops = async (tripId: string) => {
+      const stopsRef = collection(db, `trips/${tripId}/stops`);
+      const snapshot = await getDocs(stopsRef); 
+      return snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as TravelStop));
+  }
+
   const handleOpenTrip = async (trip: Trip) => {
     setLoading(true);
     try {
-      const stopsRef = collection(db, `trips/${trip.id}/stops`);
-      const snapshot = await getDocs(stopsRef); // In real app, verify orderBy
-      const stopsData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as TravelStop));
-      
+      const stopsData = await getTripStops(trip.id);
       setSelectedTrip(trip);
       setSelectedStops(stopsData);
       setView('STORY');
@@ -61,10 +71,50 @@ function App() {
     }
   };
 
+  const handleDeleteTrip = async (e: React.MouseEvent, tripId: string) => {
+      e.stopPropagation(); // Prevent card click
+      if(!window.confirm("정말 이 여행 지도를 삭제하시겠습니까?")) return;
+
+      try {
+          await deleteDoc(doc(db, "trips", tripId));
+          // Note: Subcollections (stops) are not automatically deleted in client SDK.
+          // For a production app, use a Cloud Function. For now, we hide the trip.
+          setTrips(trips.filter(t => t.id !== tripId));
+      } catch (e) {
+          alert("삭제 중 오류가 발생했습니다.");
+      }
+  }
+
+  const handleEditTrip = async (e: React.MouseEvent, trip: Trip) => {
+      e.stopPropagation();
+      setLoading(true);
+      try {
+        const stopsData = await getTripStops(trip.id);
+        setSelectedTrip(trip);
+        setSelectedStops(stopsData);
+        setIsEditing(true); // Flag to tell Editor to preload data
+        setView('EDITOR');
+      } catch (e) {
+          alert("데이터 로딩 실패");
+      } finally {
+          setLoading(false);
+      }
+  }
+
   const handleCreateComplete = () => {
     if (user) fetchTrips(user.uid);
+    setIsEditing(false);
+    setSelectedTrip(null);
+    setSelectedStops([]);
     setView('DASHBOARD');
   };
+
+  const handleStartNewTrip = () => {
+      setIsEditing(false);
+      setSelectedTrip(null);
+      setSelectedStops([]);
+      setView('EDITOR');
+  }
 
   if (loading) {
     return (
@@ -86,14 +136,23 @@ function App() {
     return <StoryMap trip={selectedTrip} stops={selectedStops} onBack={() => setView('DASHBOARD')} />;
   }
 
-  // View: Editor
+  // View: Editor (Create or Edit)
   if (view === 'EDITOR') {
-    return <TripEditor userId={user.uid} onClose={() => setView('DASHBOARD')} onSaveComplete={handleCreateComplete} />;
+    return (
+        <TripEditor 
+            userId={user.uid} 
+            onClose={() => setView('DASHBOARD')} 
+            onSaveComplete={handleCreateComplete} 
+            tripId={isEditing && selectedTrip ? selectedTrip.id : undefined}
+            initialTripData={isEditing && selectedTrip ? selectedTrip : undefined}
+            initialStops={isEditing ? selectedStops : undefined}
+        />
+    );
   }
 
   // View: Dashboard
   return (
-    <div className="min-h-screen bg-slate-50">
+    <div className="min-h-screen bg-slate-50 font-sans">
       {/* Navbar */}
       <nav className="bg-white border-b border-gray-200 sticky top-0 z-10">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -120,7 +179,7 @@ function App() {
         <div className="flex justify-between items-center mb-8">
           <h1 className="text-2xl font-bold text-gray-900">나의 여행 지도</h1>
           <button 
-            onClick={() => setView('EDITOR')}
+            onClick={handleStartNewTrip}
             className="inline-flex items-center px-4 py-2 border border-transparent rounded-lg shadow-sm text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 transition-all focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
           >
             <Plus className="-ml-1 mr-2 h-5 w-5" />
@@ -149,6 +208,25 @@ function App() {
                     className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
                   />
                   <div className="absolute inset-0 bg-gradient-to-t from-black/60 to-transparent"></div>
+                  
+                  {/* Action Buttons */}
+                  <div className="absolute top-2 right-2 flex space-x-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <button 
+                        onClick={(e) => handleEditTrip(e, trip)}
+                        className="p-2 bg-white/90 backdrop-blur rounded-full text-gray-700 hover:text-indigo-600 hover:bg-white transition-colors"
+                        title="수정"
+                      >
+                          <Edit className="w-4 h-4" />
+                      </button>
+                      <button 
+                        onClick={(e) => handleDeleteTrip(e, trip.id)}
+                        className="p-2 bg-white/90 backdrop-blur rounded-full text-gray-700 hover:text-red-600 hover:bg-white transition-colors"
+                        title="삭제"
+                      >
+                          <Trash2 className="w-4 h-4" />
+                      </button>
+                  </div>
+
                   <div className="absolute bottom-4 left-4 text-white">
                     <h3 className="text-lg font-bold">{trip.title}</h3>
                     <p className="text-xs opacity-80">{new Date(trip.createdAt.seconds * 1000).toLocaleDateString()}</p>

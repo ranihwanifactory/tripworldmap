@@ -1,14 +1,13 @@
 import React, { useState, useEffect } from 'react';
 import { db, storage } from '../firebase';
-import { collection, addDoc, doc, updateDoc, Timestamp, getDocs } from 'firebase/firestore';
+import { collection, addDoc, doc, updateDoc, Timestamp, getDocs, deleteDoc, writeBatch } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { Trip, TravelStop, TransportMode } from '../types';
 import { MapContainer, TileLayer, Marker, useMapEvents } from 'react-leaflet';
 import L from 'leaflet';
-import { Plus, Save, Wand2, X, Loader2, MapPin } from 'lucide-react';
+import { Plus, Save, Wand2, X, Loader2, MapPin, Image as ImageIcon, Trash2 } from 'lucide-react';
 import { enhanceStory } from '../services/geminiService';
 
-// Fix Leaflet default icon (Missing assets in buildless env)
 const ICON_URL = 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png';
 const ICON_SHADOW_URL = 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png';
 
@@ -23,13 +22,14 @@ let DefaultIcon = L.icon({
 L.Marker.prototype.options.icon = DefaultIcon;
 
 interface TripEditorProps {
-    tripId?: string;
+    tripId?: string; // If present, we are editing
+    initialTripData?: Trip;
+    initialStops?: TravelStop[];
     userId: string;
     onClose: () => void;
     onSaveComplete: () => void;
 }
 
-// Helper component to pick location on click
 const LocationPicker = ({ onLocationSelect }: { onLocationSelect: (lat: number, lng: number) => void }) => {
     const [pos, setPos] = useState<[number, number] | null>(null);
     useMapEvents({
@@ -41,13 +41,13 @@ const LocationPicker = ({ onLocationSelect }: { onLocationSelect: (lat: number, 
     return pos ? <Marker position={pos} /> : null;
 };
 
-const TripEditor: React.FC<TripEditorProps> = ({ tripId, userId, onClose, onSaveComplete }) => {
+const TripEditor: React.FC<TripEditorProps> = ({ tripId, initialTripData, initialStops, userId, onClose, onSaveComplete }) => {
     // Trip State
-    const [tripTitle, setTripTitle] = useState('');
-    const [tripDesc, setTripDesc] = useState('');
+    const [tripTitle, setTripTitle] = useState(initialTripData?.title || '');
+    const [tripDesc, setTripDesc] = useState(initialTripData?.description || '');
     
     // Stop State
-    const [stops, setStops] = useState<Partial<TravelStop>[]>([]);
+    const [stops, setStops] = useState<Partial<TravelStop>[]>(initialStops || []);
     const [isAddingStop, setIsAddingStop] = useState(false);
     
     // Current Editing Stop
@@ -58,9 +58,10 @@ const TripEditor: React.FC<TripEditorProps> = ({ tripId, userId, onClose, onSave
         address: '',
         transportMode: TransportMode.FLIGHT,
         arrivalDate: new Date(),
-        coordinates: { lat: 37.5665, lng: 126.9780 } // Default Seoul
+        coordinates: { lat: 37.5665, lng: 126.9780 }
     });
     const [stopImageFile, setStopImageFile] = useState<File | null>(null);
+    const [stopImageUrl, setStopImageUrl] = useState(''); // Text input for URL
     const [isAiLoading, setIsAiLoading] = useState(false);
     const [isSaving, setIsSaving] = useState(false);
 
@@ -89,26 +90,27 @@ const TripEditor: React.FC<TripEditorProps> = ({ tripId, userId, onClose, onSave
             return;
         }
 
-        let imageUrl = '';
+        let finalImageUrl = stopImageUrl; // Default to URL input
+        
         if (stopImageFile) {
-            // In a real scenario, handle upload. For now, use object URL or mock
-            // Try Firebase upload
+            // Upload takes precedence
             try {
                 const storageRef = ref(storage, `stops/${userId}/${Date.now()}_${stopImageFile.name}`);
                 await uploadBytes(storageRef, stopImageFile);
-                imageUrl = await getDownloadURL(storageRef);
+                finalImageUrl = await getDownloadURL(storageRef);
             } catch (e) {
-                console.error("Storage failed (likely permission), using local preview", e);
-                imageUrl = URL.createObjectURL(stopImageFile);
+                console.error("Storage failed", e);
+                finalImageUrl = URL.createObjectURL(stopImageFile); // Fallback
             }
-        } else {
-             imageUrl = `https://picsum.photos/800/600?random=${Math.random()}`;
+        } else if (!finalImageUrl) {
+             finalImageUrl = `https://picsum.photos/800/600?random=${Math.random()}`;
         }
 
         const newStop: Partial<TravelStop> = {
             ...currentStop,
-            id: Math.random().toString(36).substr(2, 9),
-            imageUrl,
+            // If it's a new stop, generate ID. If editing existing (future feature), keep ID.
+            id: currentStop.id || Math.random().toString(36).substr(2, 9),
+            imageUrl: finalImageUrl,
             order: stops.length + 1
         };
 
@@ -121,32 +123,70 @@ const TripEditor: React.FC<TripEditorProps> = ({ tripId, userId, onClose, onSave
             coordinates: { lat: 37.5665, lng: 126.9780 }
         });
         setStopImageFile(null);
+        setStopImageUrl('');
     };
+
+    const handleDeleteStop = (idx: number) => {
+        const newStops = [...stops];
+        newStops.splice(idx, 1);
+        setStops(newStops);
+    }
 
     const handleSaveTrip = async () => {
         if (!tripTitle) return alert("여행 제목을 입력하세요");
         setIsSaving(true);
         
         try {
-            // 1. Create Trip
             const tripData = {
                 userId,
                 title: tripTitle,
                 description: tripDesc,
-                startDate: Timestamp.fromDate(new Date()), // Simplify for demo
+                startDate: Timestamp.fromDate(new Date()), // Use actual earliest stop date in prod
                 isPublished: true,
-                createdAt: Timestamp.now()
+                updatedAt: Timestamp.now()
             };
 
-            const docRef = await addDoc(collection(db, "trips"), tripData);
-            
-            // 2. Add Stops
-            for (const stop of stops) {
-                await addDoc(collection(db, `trips/${docRef.id}/stops`), {
-                    ...stop,
-                    tripId: docRef.id,
-                    arrivalDate: Timestamp.fromDate(stop.arrivalDate as Date)
+            let finalTripId = tripId;
+
+            if (tripId) {
+                // Update existing trip
+                await updateDoc(doc(db, "trips", tripId), tripData);
+                
+                // For stops, simplified logic: Delete all existing stops for this trip and recreate them
+                // NOTE: In a high-traffic production app, you would diff the changes.
+                const stopsRef = collection(db, `trips/${tripId}/stops`);
+                const snapshot = await getDocs(stopsRef);
+                const batch = writeBatch(db);
+                snapshot.docs.forEach((doc) => {
+                    batch.delete(doc.ref);
                 });
+                await batch.commit();
+
+                // Re-add stops
+                for (const stop of stops) {
+                    await addDoc(stopsRef, {
+                        ...stop,
+                        tripId,
+                        arrivalDate: Timestamp.fromDate(stop.arrivalDate instanceof Date ? stop.arrivalDate : (stop.arrivalDate as any).toDate())
+                    });
+                }
+
+            } else {
+                // Create new trip
+                const docRef = await addDoc(collection(db, "trips"), {
+                    ...tripData,
+                    createdAt: Timestamp.now()
+                });
+                finalTripId = docRef.id;
+
+                // Add Stops
+                for (const stop of stops) {
+                    await addDoc(collection(db, `trips/${docRef.id}/stops`), {
+                        ...stop,
+                        tripId: docRef.id,
+                        arrivalDate: Timestamp.fromDate(stop.arrivalDate as Date)
+                    });
+                }
             }
 
             onSaveComplete();
@@ -159,11 +199,11 @@ const TripEditor: React.FC<TripEditorProps> = ({ tripId, userId, onClose, onSave
     };
 
     return (
-        <div className="fixed inset-0 bg-gray-100 z-50 overflow-y-auto">
+        <div className="fixed inset-0 bg-gray-100 z-50 overflow-y-auto font-sans">
             <div className="max-w-4xl mx-auto bg-white min-h-screen shadow-xl">
                 {/* Header */}
                 <div className="sticky top-0 bg-white z-20 border-b px-6 py-4 flex justify-between items-center">
-                    <h2 className="text-xl font-bold">새로운 여행 기록하기</h2>
+                    <h2 className="text-xl font-bold">{tripId ? "여행 기록 수정" : "새로운 여행 기록"}</h2>
                     <button onClick={onClose} className="p-2 hover:bg-gray-100 rounded-full"><X /></button>
                 </div>
 
@@ -194,15 +234,21 @@ const TripEditor: React.FC<TripEditorProps> = ({ tripId, userId, onClose, onSave
                         
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                             {stops.map((stop, idx) => (
-                                <div key={idx} className="border rounded-xl p-4 flex items-start space-x-3 bg-gray-50">
+                                <div key={idx} className="relative group border rounded-xl p-4 flex items-start space-x-3 bg-gray-50 hover:bg-gray-100 transition-colors">
                                     <div className="w-8 h-8 rounded-full bg-indigo-100 flex items-center justify-center text-indigo-600 font-bold shrink-0">
                                         {idx + 1}
                                     </div>
-                                    <div>
-                                        <h4 className="font-bold">{stop.title}</h4>
-                                        <p className="text-xs text-gray-500">{stop.locationName}</p>
+                                    <div className="flex-1 min-w-0">
+                                        <h4 className="font-bold truncate">{stop.title}</h4>
+                                        <p className="text-xs text-gray-500 truncate">{stop.locationName}</p>
                                         <p className="text-sm text-gray-600 mt-1 line-clamp-2">{stop.description}</p>
                                     </div>
+                                    <button 
+                                        onClick={() => handleDeleteStop(idx)}
+                                        className="absolute top-2 right-2 p-1 text-gray-400 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"
+                                    >
+                                        <Trash2 className="w-4 h-4" />
+                                    </button>
                                 </div>
                             ))}
                             
@@ -225,7 +271,7 @@ const TripEditor: React.FC<TripEditorProps> = ({ tripId, userId, onClose, onSave
                         className="w-full bg-indigo-600 text-white py-4 rounded-xl font-bold text-lg hover:bg-indigo-700 transition-all flex justify-center items-center shadow-lg"
                     >
                         {isSaving ? <Loader2 className="animate-spin mr-2" /> : <Save className="mr-2" />}
-                        여행지도 발행하기
+                        {tripId ? "수정 완료" : "여행지도 발행하기"}
                     </button>
                 </div>
             </div>
@@ -304,24 +350,40 @@ const TripEditor: React.FC<TripEditorProps> = ({ tripId, userId, onClose, onSave
                                             {isAiLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wand2 className="w-4 h-4" />}
                                         </button>
                                     </div>
-                                    <p className="text-xs text-gray-400 mt-1 text-right flex justify-end items-center">
-                                        <Wand2 className="w-3 h-3 mr-1" /> AI로 더 멋진 이야기 만들기
-                                    </p>
                                 </div>
 
                                 <div>
                                     <label className="block text-sm font-medium text-gray-700 mb-1">사진 등록</label>
-                                    <input 
-                                        type="file" 
-                                        accept="image/*"
-                                        onChange={e => setStopImageFile(e.target.files ? e.target.files[0] : null)}
-                                        className="w-full text-sm text-gray-500
-                                        file:mr-4 file:py-2 file:px-4
-                                        file:rounded-full file:border-0
-                                        file:text-sm file:font-semibold
-                                        file:bg-indigo-50 file:text-indigo-700
-                                        hover:file:bg-indigo-100"
-                                    />
+                                    <div className="space-y-3">
+                                        <input 
+                                            type="text" 
+                                            placeholder="이미지 URL 입력 (https://...)" 
+                                            value={stopImageUrl}
+                                            onChange={(e) => setStopImageUrl(e.target.value)}
+                                            className="w-full border rounded-lg p-2 text-sm"
+                                        />
+                                        <div className="text-center text-xs text-gray-400">또는</div>
+                                        <input 
+                                            type="file" 
+                                            accept="image/*"
+                                            onChange={e => setStopImageFile(e.target.files ? e.target.files[0] : null)}
+                                            className="w-full text-sm text-gray-500
+                                            file:mr-4 file:py-2 file:px-4
+                                            file:rounded-full file:border-0
+                                            file:text-sm file:font-semibold
+                                            file:bg-indigo-50 file:text-indigo-700
+                                            hover:file:bg-indigo-100"
+                                        />
+                                    </div>
+                                    {(stopImageUrl || stopImageFile) && (
+                                        <div className="mt-2 h-20 w-20 rounded-lg overflow-hidden bg-gray-100 border relative">
+                                            {stopImageFile ? (
+                                                <div className="w-full h-full flex items-center justify-center text-xs text-gray-500">File Selected</div>
+                                            ) : (
+                                                <img src={stopImageUrl} alt="Preview" className="w-full h-full object-cover" />
+                                            )}
+                                        </div>
+                                    )}
                                 </div>
                             </div>
 
