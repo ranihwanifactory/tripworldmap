@@ -4,14 +4,15 @@ import { getFirestore } from "firebase/firestore";
 import { getStorage } from "firebase/storage";
 
 const firebaseConfig = {
-  apiKey: "AIzaSyAoXlSX5lcT_KvTBcsaWIsmJTB1ESx-6Z8",
-  authDomain: "timetable-6cc8d.firebaseapp.com",
-  projectId: "timetable-6cc8d",
-  storageBucket: "timetable-6cc8d.firebasestorage.app",
-  messagingSenderId: "79235804239",
-  appId: "1:79235804239:web:62b5e87a6d47f510604e3a"
+  apiKey: "AIzaSyAieoY_nzVR2id4vtDAE6R19azq7KC928g",
+  authDomain: "myjeju-292cb.firebaseapp.com",
+  projectId: "myjeju-292cb",
+  storageBucket: "myjeju-292cb.firebasestorage.app",
+  messagingSenderId: "374353569802",
+  appId: "1:374353569802:web:f567b01a5bec70651017f3"
 };
 
+// Initialize Firebase
 const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
 export const googleProvider = new GoogleAuthProvider();

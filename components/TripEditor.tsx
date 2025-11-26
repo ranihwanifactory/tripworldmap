@@ -1,559 +1,404 @@
-
-import React, { useEffect, useRef, useState } from 'react';
-import { TripPoint, TransportType, TripData } from '../types';
-import { db, auth, storage } from '../firebase';
-import { collection, addDoc, doc, updateDoc } from 'firebase/firestore';
+import React, { useState, useEffect } from 'react';
+import { db, storage } from '../firebase';
+import { collection, addDoc, doc, updateDoc, Timestamp, getDocs, deleteDoc, writeBatch } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
-import { Plus, Trash2, Image as ImageIcon, Loader2, Save, ArrowLeft, Pencil, X, MapPin, AlertCircle } from 'lucide-react';
+import { Trip, TravelStop, TransportMode } from '../types';
+import { MapContainer, TileLayer, Marker, useMapEvents } from 'react-leaflet';
+import L from 'leaflet';
+import { Plus, Save, Wand2, X, Loader2, MapPin, Image as ImageIcon, Trash2 } from 'lucide-react';
+import { enhanceStory } from '../services/geminiService';
+
+const ICON_URL = 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png';
+const ICON_SHADOW_URL = 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png';
+
+let DefaultIcon = L.icon({
+    iconUrl: ICON_URL,
+    shadowUrl: ICON_SHADOW_URL,
+    iconAnchor: [12, 41],
+    iconSize: [25, 41],
+    popupAnchor: [1, -34],
+    shadowSize: [41, 41]
+});
+L.Marker.prototype.options.icon = DefaultIcon;
 
 interface TripEditorProps {
-  onFinish: () => void;
-  initialData?: TripData | null;
+    tripId?: string; // If present, we are editing
+    initialTripData?: Trip;
+    initialStops?: TravelStop[];
+    userId: string;
+    onClose: () => void;
+    onSaveComplete: () => void;
 }
 
-// Robust sort helper
-const robustSort = (a: TripPoint, b: TripPoint) => {
-    const timeA = new Date(a.date).getTime();
-    const timeB = new Date(b.date).getTime();
-    
-    // 1. Timestamp compare
-    if (!isNaN(timeA) && !isNaN(timeB)) {
-        if (timeA !== timeB) return timeA - timeB;
-    }
-    
-    // 2. String compare (ISO format YYYY-MM-DDTHH:mm is lexicographically sortable)
-    const strComp = a.date.localeCompare(b.date);
-    if (strComp !== 0) return strComp;
-    
-    // 3. Fallback to ID (stable sort for identical times)
-    return a.id.localeCompare(b.id);
+const LocationPicker = ({ onLocationSelect }: { onLocationSelect: (lat: number, lng: number) => void }) => {
+    const [pos, setPos] = useState<[number, number] | null>(null);
+    useMapEvents({
+        click(e) {
+            setPos([e.latlng.lat, e.latlng.lng]);
+            onLocationSelect(e.latlng.lat, e.latlng.lng);
+        },
+    });
+    return pos ? <Marker position={pos} /> : null;
 };
 
-const TripEditor: React.FC<TripEditorProps> = ({ onFinish, initialData }) => {
-  const mapRef = useRef<HTMLDivElement>(null);
-  const [map, setMap] = useState<any>(null);
-  const [marker, setMarker] = useState<any>(null);
-  
-  // Trip State
-  const [points, setPoints] = useState<TripPoint[]>([]);
-  const [tripTitle, setTripTitle] = useState('');
-  const [isSaving, setIsSaving] = useState(false);
-  const [isUploadingPoint, setIsUploadingPoint] = useState(false);
+const TripEditor: React.FC<TripEditorProps> = ({ tripId, initialTripData, initialStops, userId, onClose, onSaveComplete }) => {
+    // Trip State
+    const [tripTitle, setTripTitle] = useState(initialTripData?.title || '');
+    const [tripDesc, setTripDesc] = useState(initialTripData?.description || '');
+    
+    // Stop State
+    const [stops, setStops] = useState<Partial<TravelStop>[]>(initialStops || []);
+    const [isAddingStop, setIsAddingStop] = useState(false);
+    
+    // Current Editing Stop
+    const [currentStop, setCurrentStop] = useState<Partial<TravelStop>>({
+        title: '',
+        description: '',
+        locationName: '',
+        address: '',
+        transportMode: TransportMode.FLIGHT,
+        arrivalDate: new Date(),
+        coordinates: { lat: 37.5665, lng: 126.9780 }
+    });
+    const [stopImageFile, setStopImageFile] = useState<File | null>(null);
+    const [stopImageUrl, setStopImageUrl] = useState(''); // Text input for URL
+    const [isAiLoading, setIsAiLoading] = useState(false);
+    const [isSaving, setIsSaving] = useState(false);
 
-  // Edit Point State
-  const [editingPointId, setEditingPointId] = useState<string | null>(null);
-
-  // Form State
-  const [currentLat, setCurrentLat] = useState<number>(37.566826);
-  const [currentLng, setCurrentLng] = useState<number>(126.9786567);
-  const [locationName, setLocationName] = useState('');
-  const [address, setAddress] = useState('');
-  const [date, setDate] = useState('');
-  const [transport, setTransport] = useState<TransportType>('CAR');
-  const [title, setTitle] = useState('');
-  const [description, setDescription] = useState('');
-  
-  // Photo State
-  const [photoUrl, setPhotoUrl] = useState('');
-  const [photoFile, setPhotoFile] = useState<File | null>(null);
-  const [previewUrl, setPreviewUrl] = useState<string>('');
-
-  // Initialize Data for Edit Mode
-  useEffect(() => {
-    if (initialData) {
-      setTripTitle(initialData.title);
-      // Sort points strictly by date
-      const sortedPoints = [...initialData.points].sort(robustSort);
-      setPoints(sortedPoints);
-    }
-  }, [initialData]);
-
-  // Initialize Map with ResizeObserver for robustness
-  useEffect(() => {
-    if (!mapRef.current) return;
-
-    const startLat = initialData && initialData.points.length > 0 ? initialData.points[0].lat : 37.566826;
-    const startLng = initialData && initialData.points.length > 0 ? initialData.points[0].lng : 126.9786567;
-
-    const options = {
-      center: new window.kakao.maps.LatLng(startLat, startLng),
-      level: 3,
+    const handleLocationSelect = (lat: number, lng: number) => {
+        setCurrentStop(prev => ({ ...prev, coordinates: { lat, lng } }));
     };
-    const newMap = new window.kakao.maps.Map(mapRef.current, options);
-    setMap(newMap);
 
-    const newMarker = new window.kakao.maps.Marker({
-      position: newMap.getCenter(),
-    });
-    newMarker.setMap(newMap);
-    setMarker(newMarker);
-
-    // FIX: Resize Observer to handle container size changes
-    const resizeObserver = new ResizeObserver(() => {
-        newMap.relayout();
-        newMap.setCenter(newMap.getCenter());
-    });
-    resizeObserver.observe(mapRef.current);
-
-    // Initial relayout to ensure full rendering
-    setTimeout(() => newMap.relayout(), 500);
-
-    window.kakao.maps.event.addListener(newMap, 'click', (mouseEvent: any) => {
-      const latlng = mouseEvent.latLng;
-      newMarker.setPosition(latlng);
-      setCurrentLat(latlng.getLat());
-      setCurrentLng(latlng.getLng());
-      
-      const geocoder = new window.kakao.maps.services.Geocoder();
-      geocoder.coord2Address(latlng.getLng(), latlng.getLat(), (result: any, status: any) => {
-        if (status === window.kakao.maps.services.Status.OK) {
-          setAddress(result[0].address.address_name);
+    const handleAiEnhance = async () => {
+        if (!currentStop.locationName || !currentStop.description) {
+            alert('장소명과 간단한 메모를 먼저 입력해주세요.');
+            return;
         }
-      });
-    });
-
-    updatePolyline(newMap, points);
-
-    return () => {
-        resizeObserver.disconnect();
+        setIsAiLoading(true);
+        const enhanced = await enhanceStory(
+            currentStop.locationName, 
+            currentStop.description, 
+            currentStop.transportMode || '이동'
+        );
+        setCurrentStop(prev => ({ ...prev, description: enhanced }));
+        setIsAiLoading(false);
     };
-  }, [initialData]); 
 
-  // Update Polyline
-  useEffect(() => {
-    if (map) {
-        updatePolyline(map, points);
-    }
-  }, [points, map]);
+    const handleAddStop = async () => {
+        if(!currentStop.title || !currentStop.locationName) {
+            alert("제목과 장소명을 입력해주세요.");
+            return;
+        }
 
-  const updatePolyline = (targetMap: any, tripPoints: TripPoint[]) => {
-      if (tripPoints.length < 2) return;
-      // Sort before drawing
-      const sorted = [...tripPoints].sort(robustSort);
-      const linePath = sorted.map(p => new window.kakao.maps.LatLng(p.lat, p.lng));
-      
-      const polyline = new window.kakao.maps.Polyline({
-        path: linePath,
-        strokeWeight: 5,
-        strokeColor: '#4F46E5',
-        strokeOpacity: 0.8,
-        strokeStyle: 'solid'
-      });
-      // Note: In a production app, we should clear previous polylines properly
-      polyline.setMap(targetMap);
-  };
+        let finalImageUrl = stopImageUrl; // Default to URL input
+        
+        if (stopImageFile) {
+            // Upload takes precedence
+            try {
+                const storageRef = ref(storage, `stops/${userId}/${Date.now()}_${stopImageFile.name}`);
+                await uploadBytes(storageRef, stopImageFile);
+                finalImageUrl = await getDownloadURL(storageRef);
+            } catch (e) {
+                console.error("Storage failed", e);
+                finalImageUrl = URL.createObjectURL(stopImageFile); // Fallback
+            }
+        } else if (!finalImageUrl) {
+             finalImageUrl = `https://picsum.photos/800/600?random=${Math.random()}`;
+        }
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      const file = e.target.files[0];
-      setPhotoFile(file);
-      setPreviewUrl(URL.createObjectURL(file));
-      setPhotoUrl(''); 
-    }
-  };
+        const newStop: Partial<TravelStop> = {
+            ...currentStop,
+            id: currentStop.id || Math.random().toString(36).substr(2, 9),
+            imageUrl: finalImageUrl,
+            order: stops.length + 1
+        };
 
-  const clearForm = () => {
-    setTitle('');
-    setDescription('');
-    setLocationName('');
-    setAddress('');
-    setDate(''); 
-    setPhotoUrl('');
-    setPhotoFile(null);
-    setPreviewUrl('');
-    setEditingPointId(null);
-  };
+        setStops([...stops, newStop]);
+        setIsAddingStop(false);
+        // Reset
+        setCurrentStop({
+            title: '', description: '', locationName: '', address: '',
+            transportMode: TransportMode.FLIGHT, arrivalDate: new Date(),
+            coordinates: { lat: 37.5665, lng: 126.9780 }
+        });
+        setStopImageFile(null);
+        setStopImageUrl('');
+    };
 
-  const handleEditPoint = (point: TripPoint) => {
-    setEditingPointId(point.id);
-    setCurrentLat(point.lat);
-    setCurrentLng(point.lng);
-    setLocationName(point.locationName);
-    setAddress(point.address);
-    setDate(point.date);
-    setTransport(point.transportToNext);
-    setTitle(point.title);
-    setDescription(point.description);
-    setPhotoUrl(point.photoUrl);
-    setPreviewUrl(point.photoUrl); 
-    setPhotoFile(null); 
-
-    if (map && marker) {
-        const pos = new window.kakao.maps.LatLng(point.lat, point.lng);
-        map.panTo(pos);
-        marker.setPosition(pos);
-    }
-  };
-
-  const handleAddOrUpdatePoint = async () => {
-    if (!title || !date) {
-      alert('제목과 날짜는 필수입니다.');
-      return;
+    const handleDeleteStop = (idx: number) => {
+        const newStops = [...stops];
+        newStops.splice(idx, 1);
+        setStops(newStops);
     }
 
-    setIsUploadingPoint(true);
-    let finalPhotoUrl = photoUrl;
+    const handleSaveTrip = async () => {
+        if (!tripTitle) return alert("여행 제목을 입력하세요");
+        if (!userId) return alert("로그인 세션이 만료되었습니다.");
 
-    try {
-      // 1. Handle File Upload
-      if (photoFile) {
-        const userId = auth.currentUser?.uid || 'anonymous';
-        const randomStr = Math.random().toString(36).substring(7);
-        const fileName = `${Date.now()}_${randomStr}`;
-        const storageRef = ref(storage, `trip_images/${userId}/${fileName}`);
+        setIsSaving(true);
         
         try {
-            const snapshot = await uploadBytes(storageRef, photoFile);
-            finalPhotoUrl = await getDownloadURL(snapshot.ref);
-        } catch (uploadError: any) {
-            console.error("Firebase Storage Upload Error:", uploadError);
-            console.warn("TIP: Go to Firebase Console > Storage > Rules and change to 'allow read, write: if true;' for development.");
-            
-            // Fallback for unauthorized/permission errors
-            const keywords = ['travel', 'nature', 'road', 'city', 'food'];
-            const randomKeyword = keywords[Math.floor(Math.random() * keywords.length)];
-            finalPhotoUrl = `https://source.unsplash.com/800x600/?${randomKeyword}&sig=${Math.random()}`;
-            alert(`사진 업로드 권한이 없어 기본 여행 이미지로 대체합니다.\n(Firebase Storage Rules 설정을 확인해주세요)`);
+            const tripData = {
+                userId,
+                title: tripTitle,
+                description: tripDesc,
+                startDate: Timestamp.fromDate(new Date()), // Use actual earliest stop date in prod
+                isPublished: true,
+                updatedAt: Timestamp.now()
+            };
+
+            let finalTripId = tripId;
+
+            if (tripId) {
+                // Update existing trip
+                await updateDoc(doc(db, "trips", tripId), tripData);
+                
+                // For stops, simplified logic: Delete all existing stops for this trip and recreate them
+                const stopsRef = collection(db, `trips/${tripId}/stops`);
+                const snapshot = await getDocs(stopsRef);
+                const batch = writeBatch(db);
+                snapshot.docs.forEach((doc) => {
+                    batch.delete(doc.ref);
+                });
+                await batch.commit();
+
+                // Re-add stops
+                for (const stop of stops) {
+                    await addDoc(stopsRef, {
+                        ...stop,
+                        tripId,
+                        arrivalDate: Timestamp.fromDate(stop.arrivalDate instanceof Date ? stop.arrivalDate : (stop.arrivalDate as any).toDate())
+                    });
+                }
+
+            } else {
+                // Create new trip
+                const docRef = await addDoc(collection(db, "trips"), {
+                    ...tripData,
+                    createdAt: Timestamp.now()
+                });
+                finalTripId = docRef.id;
+
+                // Add Stops
+                for (const stop of stops) {
+                    await addDoc(collection(db, `trips/${docRef.id}/stops`), {
+                        ...stop,
+                        tripId: docRef.id,
+                        arrivalDate: Timestamp.fromDate(stop.arrivalDate as Date)
+                    });
+                }
+            }
+
+            onSaveComplete();
+        } catch (error) {
+            console.error("Error saving trip", error);
+            alert("저장 중 오류가 발생했습니다.");
+        } finally {
+            setIsSaving(false);
         }
-      } 
-      // 2. Use Fallback if empty
-      else if (!finalPhotoUrl) {
-        const keywords = ['travel', 'landscape', 'view'];
-        const randomKeyword = keywords[Math.floor(Math.random() * keywords.length)];
-        finalPhotoUrl = `https://source.unsplash.com/800x600/?${randomKeyword}&sig=${Math.random()}`;
-      }
+    };
 
-      const pointData = {
-        lat: currentLat,
-        lng: currentLng,
-        locationName: locationName || address || '알 수 없는 장소',
-        address,
-        date,
-        transportToNext: transport,
-        title,
-        description,
-        photoUrl: finalPhotoUrl,
-      };
-
-      let updatedPoints: TripPoint[] = [];
-
-      if (editingPointId) {
-        updatedPoints = points.map(p => p.id === editingPointId ? { ...p, ...pointData } : p);
-      } else {
-        const newPoint: TripPoint = {
-            id: Date.now().toString(),
-            order: 0, // Placeholder
-            ...pointData
-        };
-        updatedPoints = [...points, newPoint];
-      }
-
-      // CRITICAL: Robust Sort chronologically by date
-      updatedPoints.sort(robustSort);
-      
-      // Reassign order
-      updatedPoints = updatedPoints.map((p, idx) => ({ ...p, order: idx }));
-
-      setPoints(updatedPoints);
-      clearForm();
-
-    } catch (error) {
-      console.error("Error processing point:", error);
-      alert("지점 저장 중 오류가 발생했습니다.");
-    } finally {
-      setIsUploadingPoint(false);
-    }
-  };
-
-  const handleSaveTrip = async () => {
-    if (!tripTitle) return alert('여행 제목을 입력해주세요.');
-    if (points.length < 2) return alert('최소 2개 이상의 지점을 등록해주세요.');
-    
-    setIsSaving(true);
-    try {
-      // FORCE FINAL SORT before saving to DB
-      const finalPoints = [...points].sort(robustSort).map((p, idx) => ({ ...p, order: idx }));
-
-      const tripData = {
-        userId: auth.currentUser?.uid || 'anonymous',
-        title: tripTitle,
-        points: finalPoints,
-        createdAt: initialData ? initialData.createdAt : Date.now(),
-      };
-
-      if (initialData && initialData.id) {
-        const tripRef = doc(db, 'trips', initialData.id);
-        await updateDoc(tripRef, tripData);
-        alert('여행이 성공적으로 수정되었습니다!');
-      } else {
-        await addDoc(collection(db, 'trips'), tripData);
-        alert('여행이 성공적으로 저장되었습니다!');
-      }
-      onFinish();
-    } catch (e) {
-      console.error(e);
-      alert('저장 중 오류가 발생했습니다. (Firestore Rules를 확인해주세요)');
-    } finally {
-      setIsSaving(false);
-    }
-  };
-
-  return (
-    <div className="flex flex-col h-screen md:flex-row bg-gray-50">
-      {/* Sidebar - Fixed Layout */}
-      <div className="w-full md:w-[420px] bg-white shadow-xl z-20 flex flex-col h-full border-r border-gray-200">
-        
-        {/* 1. Header Area (Fixed) */}
-        <div className="p-5 border-b bg-white z-10">
-            <div className="flex items-center mb-3">
-                <button onClick={onFinish} className="mr-3 p-2 hover:bg-gray-100 rounded-full transition">
-                    <ArrowLeft size={20} className="text-gray-600"/>
-                </button>
-                <h2 className="text-xl font-bold text-indigo-800">
-                    {initialData ? '여행 수정하기' : '새 여행 만들기'}
-                </h2>
-            </div>
-            <div>
-                <input 
-                    type="text" 
-                    className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 text-lg font-bold"
-                    placeholder="여행 제목 (예: 부산 식도락 여행)"
-                    value={tripTitle}
-                    onChange={(e) => setTripTitle(e.target.value)}
-                />
-            </div>
-        </div>
-
-        {/* 2. Registered List Area (Fixed Height, Scrollable) */}
-        <div className="bg-gray-50 border-b flex-shrink-0">
-             <div className="px-5 py-3 flex justify-between items-center bg-gray-100/50">
-                <h4 className="font-bold text-gray-600 text-sm flex items-center">
-                    <MapPin size={14} className="mr-1"/> 등록된 경로 ({points.length})
-                    <span className="text-[10px] text-gray-400 font-normal ml-2">(시간순 자동정렬됨)</span>
-                </h4>
-                <span className="text-xs text-indigo-500 font-medium bg-indigo-50 px-2 py-0.5 rounded">수정하려면 클릭</span>
-             </div>
-             
-             <div className="max-h-[220px] overflow-y-auto p-4 space-y-2 custom-scrollbar">
-                {points.length === 0 && (
-                    <div className="text-center py-6 border-2 border-dashed border-gray-300 rounded-lg bg-white">
-                        <MapPin className="mx-auto text-gray-300 mb-2" />
-                        <p className="text-xs text-gray-400">지도에서 위치를 선택하고<br/>아래 폼을 작성하여 추가해주세요.</p>
-                    </div>
-                )}
-                {points.map((p, idx) => (
-                    <div 
-                        key={p.id} 
-                        onClick={() => handleEditPoint(p)}
-                        className={`p-3 bg-white border rounded-lg shadow-sm flex gap-3 hover:shadow-md transition cursor-pointer group ${editingPointId === p.id ? 'border-yellow-500 ring-1 ring-yellow-500 bg-yellow-50' : 'border-gray-200'}`}
-                    >
-                        <div className="w-12 h-12 bg-gray-100 rounded-md overflow-hidden flex-shrink-0 relative">
-                            <img src={p.photoUrl} alt="" className="w-full h-full object-cover" />
-                             <div className="absolute top-0 left-0 bg-black/50 text-white text-[10px] px-1 rounded-br">#{idx + 1}</div>
-                        </div>
-                        <div className="flex-1 min-w-0">
-                            <div className="flex justify-between items-start">
-                                <div>
-                                    <h5 className="font-bold text-sm text-gray-800 truncate">
-                                        {p.title}
-                                    </h5>
-                                    <p className="text-[10px] text-blue-600 font-bold mt-0.5 flex items-center">
-                                        <ClockIcon size={10} className="mr-1"/>
-                                        {new Date(p.date).toLocaleString([], {month:'numeric', day:'numeric', hour:'2-digit', minute:'2-digit'})}
-                                    </p>
-                                </div>
-                                <button 
-                                    onClick={(e) => {
-                                        e.stopPropagation();
-                                        if(window.confirm('삭제하시겠습니까?')) {
-                                            const filtered = points.filter(pt => pt.id !== p.id);
-                                            // Sort after delete just in case
-                                            filtered.sort(robustSort);
-                                            const reordered = filtered.map((pt, i) => ({...pt, order: i}));
-                                            setPoints(reordered);
-                                            if(editingPointId === p.id) clearForm();
-                                        }
-                                    }}
-                                    className="text-gray-400 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity p-1"
-                                >
-                                    <Trash2 size={14} />
-                                </button>
-                            </div>
-                            <p className="text-xs text-gray-500 truncate mt-0.5">{p.locationName}</p>
-                        </div>
-                    </div>
-                ))}
-             </div>
-        </div>
-
-        {/* 3. Input Form Area (Scrollable) */}
-        <div className="flex-1 overflow-y-auto p-5 bg-white">
-            <div className={`p-4 rounded-xl border transition-all ${editingPointId ? 'border-yellow-400 bg-yellow-50/30 shadow-inner' : 'border-indigo-100 bg-indigo-50/30'}`}>
-                <div className="flex justify-between items-center mb-4">
-                    <h3 className="font-bold text-gray-800 flex items-center text-sm">
-                        {editingPointId ? 
-                            <><Pencil size={16} className="mr-2 text-yellow-600"/> 선택한 지점 수정 중</> : 
-                            <><Plus size={16} className="mr-2 text-indigo-600"/> 새 지점 정보 입력</>
-                        }
-                    </h3>
-                    {editingPointId && (
-                        <button onClick={clearForm} className="text-xs flex items-center text-gray-500 hover:text-gray-800 bg-white px-2 py-1 rounded border shadow-sm">
-                            <X size={12} className="mr-1"/> 수정 취소
-                        </button>
-                    )}
+    return (
+        <div className="fixed inset-0 bg-gray-100 z-50 overflow-y-auto font-sans text-slate-900">
+            <div className="max-w-4xl mx-auto bg-white min-h-screen shadow-xl">
+                {/* Header */}
+                <div className="sticky top-0 bg-white z-20 border-b px-6 py-4 flex justify-between items-center">
+                    <h2 className="text-xl font-bold">{tripId ? "여행 기록 수정" : "새로운 여행 기록"}</h2>
+                    <button onClick={onClose} className="p-2 hover:bg-gray-100 rounded-full"><X /></button>
                 </div>
 
-                <div className="space-y-3">
-                    <div>
-                        <label className="block text-xs font-medium text-gray-500 mb-1">장소명</label>
+                <div className="p-6 space-y-8">
+                    {/* Trip Info */}
+                    <div className="space-y-4">
                         <input 
                             type="text" 
-                            className="w-full p-2.5 border rounded-lg text-sm focus:ring-1 focus:ring-indigo-500 outline-none"
-                            placeholder="지도 클릭 시 자동 입력"
-                            value={locationName}
-                            onChange={(e) => setLocationName(e.target.value)}
+                            placeholder="여행 제목 (예: 2024 유럽 배낭여행)" 
+                            className="w-full text-3xl font-bold border-b-2 border-gray-200 focus:border-indigo-600 outline-none pb-2 placeholder-gray-300"
+                            value={tripTitle}
+                            onChange={(e) => setTripTitle(e.target.value)}
                         />
-                    </div>
-                    <div>
-                        <label className="block text-xs font-medium text-blue-600 font-bold mb-1">방문 날짜 (필수: 시간순 정렬 기준)</label>
-                        <input 
-                            type="datetime-local" 
-                            className="w-full p-2.5 border border-blue-200 rounded-lg text-sm outline-none bg-blue-50 focus:bg-white transition"
-                            value={date}
-                            onChange={(e) => setDate(e.target.value)}
-                            required
-                        />
-                    </div>
-                    
-                    <div>
-                        <label className="block text-xs font-medium text-gray-500 mb-1">다음 장소까지 이동 수단</label>
-                        <select 
-                            className="w-full p-2.5 border rounded-lg text-sm outline-none bg-white"
-                            value={transport}
-                            onChange={(e) => setTransport(e.target.value as TransportType)}
-                        >
-                            <option value="CAR">자동차 🚗</option>
-                            <option value="WALK">도보 🚶</option>
-                            <option value="TRAIN">기차 🚆</option>
-                            <option value="BUS">버스 🚌</option>
-                            <option value="PLANE">비행기 ✈️</option>
-                            <option value="SHIP">배 ⛴️</option>
-                        </select>
-                    </div>
-
-                    <div>
-                         <label className="block text-xs font-medium text-gray-500 mb-1">제목</label>
-                        <input 
-                            type="text" 
-                            className="w-full p-2.5 border rounded-lg text-sm outline-none"
-                            placeholder="지점의 제목 (예: 맛있는 점심)"
-                            value={title}
-                            onChange={(e) => setTitle(e.target.value)}
-                        />
-                    </div>
-
-                    <div>
-                        <label className="block text-xs font-medium text-gray-500 mb-1">이야기</label>
                         <textarea 
-                            className="w-full p-2.5 border rounded-lg text-sm outline-none min-h-[80px]"
-                            placeholder="이곳에서의 추억을 기록하세요..."
-                            value={description}
-                            onChange={(e) => setDescription(e.target.value)}
+                            placeholder="이번 여행의 전체적인 테마나 소감을 적어주세요..." 
+                            className="w-full text-gray-600 resize-none border p-3 rounded-lg focus:ring-2 focus:ring-indigo-100 outline-none"
+                            rows={3}
+                            value={tripDesc}
+                            onChange={(e) => setTripDesc(e.target.value)}
                         />
                     </div>
 
-                    {/* Photo Upload */}
-                    <div>
-                         <label className="block text-xs font-medium text-gray-500 mb-1">사진 (파일 또는 URL)</label>
-                         <div className="space-y-2">
-                             <div className="flex gap-2">
-                                <label className={`flex-1 flex flex-col items-center justify-center h-24 border-2 border-dashed rounded-lg cursor-pointer hover:bg-gray-50 transition relative overflow-hidden ${photoFile ? 'border-indigo-500 bg-indigo-50' : 'border-gray-300'}`}>
-                                    {previewUrl && !photoUrl ? (
-                                        <img src={previewUrl} alt="Preview" className="h-full w-full object-cover" />
-                                    ) : (
-                                        <div className="flex flex-col items-center justify-center p-2 text-center">
-                                            <ImageIcon className="w-5 h-5 text-gray-400 mb-1" />
-                                            <span className="text-[10px] text-gray-500 break-all">{photoFile ? photoFile.name : '파일 선택'}</span>
-                                        </div>
-                                    )}
-                                    <input type="file" className="hidden" accept="image/*" onChange={handleFileChange} />
-                                </label>
-                                
-                                {previewUrl && (
-                                    <div className="w-24 h-24 rounded-lg overflow-hidden border border-gray-200 bg-gray-100 relative shrink-0">
-                                        <img src={previewUrl} className="w-full h-full object-cover" alt="Current" />
-                                        <button 
-                                            onClick={() => { setPhotoFile(null); setPreviewUrl(''); setPhotoUrl(''); }}
-                                            className="absolute top-0 right-0 bg-red-500 text-white p-1 rounded-bl-lg hover:bg-red-600 transition"
-                                            title="사진 삭제"
-                                        >
-                                            <Trash2 size={12} />
-                                        </button>
+                    {/* Stops List */}
+                    <div className="space-y-4">
+                        <div className="flex justify-between items-end">
+                            <h3 className="text-lg font-semibold text-gray-800">여행 경로 ({stops.length})</h3>
+                        </div>
+                        
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            {stops.map((stop, idx) => (
+                                <div key={idx} className="relative group border rounded-xl p-4 flex items-start space-x-3 bg-gray-50 hover:bg-gray-100 transition-colors">
+                                    <div className="w-8 h-8 rounded-full bg-indigo-100 flex items-center justify-center text-indigo-600 font-bold shrink-0">
+                                        {idx + 1}
                                     </div>
-                                )}
-                             </div>
-                             <input 
-                                type="text" 
-                                className="w-full p-2 border rounded-lg text-xs"
-                                placeholder="이미지 URL 직접 입력"
-                                value={photoUrl}
-                                onChange={(e) => {
-                                    setPhotoUrl(e.target.value);
-                                    setPreviewUrl(e.target.value);
-                                    setPhotoFile(null);
-                                }}
-                            />
-                            <p className="text-[10px] text-gray-400 flex items-center">
-                                <AlertCircle size={10} className="mr-1"/> 파일 업로드가 안될 경우 URL을 입력하거나 Firebase Rules를 확인하세요.
-                            </p>
-                         </div>
+                                    <div className="flex-1 min-w-0">
+                                        <h4 className="font-bold truncate">{stop.title}</h4>
+                                        <p className="text-xs text-gray-500 truncate">{stop.locationName}</p>
+                                        <p className="text-sm text-gray-600 mt-1 line-clamp-2">{stop.description}</p>
+                                    </div>
+                                    <button 
+                                        onClick={() => handleDeleteStop(idx)}
+                                        className="absolute top-2 right-2 p-1 text-gray-400 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"
+                                    >
+                                        <Trash2 className="w-4 h-4" />
+                                    </button>
+                                </div>
+                            ))}
+                            
+                            <button 
+                                onClick={() => setIsAddingStop(true)}
+                                className="border-2 border-dashed border-gray-300 rounded-xl p-4 flex flex-col items-center justify-center text-gray-500 hover:border-indigo-500 hover:text-indigo-500 transition-colors min-h-[120px]"
+                            >
+                                <Plus className="w-8 h-8 mb-2" />
+                                <span>여행지 추가하기</span>
+                            </button>
+                        </div>
                     </div>
+                </div>
 
+                {/* Bottom Action */}
+                <div className="p-6 border-t bg-gray-50">
                     <button 
-                        onClick={handleAddOrUpdatePoint}
-                        disabled={isUploadingPoint}
-                        className={`w-full py-3 rounded-xl transition flex justify-center items-center font-bold text-white shadow-md ${
-                            isUploadingPoint ? 'bg-gray-400' : 
-                            editingPointId ? 'bg-yellow-500 hover:bg-yellow-600' : 'bg-indigo-600 hover:bg-indigo-700'
-                        }`}
+                        onClick={handleSaveTrip}
+                        disabled={isSaving}
+                        className="w-full bg-indigo-600 text-white py-4 rounded-xl font-bold text-lg hover:bg-indigo-700 transition-all flex justify-center items-center shadow-lg"
                     >
-                    {isUploadingPoint ? <Loader2 className="animate-spin" size={20} /> : (editingPointId ? '지점 수정 완료' : '지점 추가')}
+                        {isSaving ? <Loader2 className="animate-spin mr-2" /> : <Save className="mr-2" />}
+                        {tripId ? "수정 완료" : "여행지도 발행하기"}
                     </button>
                 </div>
             </div>
-        </div>
-        
-        {/* 4. Footer Save Action */}
-        <div className="p-4 bg-white border-t">
-            <button 
-            onClick={handleSaveTrip}
-            disabled={isSaving || points.length < 2}
-            className={`w-full text-white py-3.5 rounded-xl font-bold shadow-lg flex items-center justify-center text-lg ${isSaving || points.length < 2 ? 'bg-gray-400 cursor-not-allowed' : 'bg-green-600 hover:bg-green-700'}`}
-            >
-            <Save size={20} className="mr-2" />
-            {isSaving ? '저장 중...' : '여행 지도 발행하기'}
-            </button>
-        </div>
 
-      </div>
+            {/* Add Stop Modal */}
+            {isAddingStop && (
+                <div className="fixed inset-0 bg-black/50 z-[60] flex items-center justify-center p-4">
+                    <div className="bg-white rounded-2xl w-full max-w-4xl h-[90vh] overflow-hidden flex flex-col md:flex-row">
+                        {/* Map Picker Side */}
+                        <div className="w-full md:w-1/2 h-64 md:h-full relative">
+                            <MapContainer center={[currentStop.coordinates!.lat, currentStop.coordinates!.lng]} zoom={13} style={{ height: '100%', width: '100%' }}>
+                                <TileLayer url="https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png" />
+                                <LocationPicker onLocationSelect={handleLocationSelect} />
+                            </MapContainer>
+                            <div className="absolute top-4 left-4 bg-white/90 px-3 py-1 rounded-full text-xs font-semibold shadow-md z-[1000]">
+                                지도를 클릭하여 위치 선택
+                            </div>
+                        </div>
 
-      {/* Map Area */}
-      <div className="flex-1 relative bg-gray-200">
-        <div ref={mapRef} className="w-full h-full absolute inset-0" />
-        <div className="absolute top-4 left-4 z-10 bg-white/90 backdrop-blur px-4 py-3 rounded-xl shadow-lg border border-white/20">
-          <p className="text-sm font-bold text-indigo-900 flex items-center">
-            <MapPin size={16} className="mr-2 text-indigo-600"/>
-            지도에서 위치를 클릭하여 추가하세요
-          </p>
+                        {/* Form Side */}
+                        <div className="w-full md:w-1/2 p-6 overflow-y-auto flex flex-col">
+                            <div className="flex justify-between items-center mb-6">
+                                <h3 className="text-xl font-bold">세부 일정 등록</h3>
+                                <button onClick={() => setIsAddingStop(false)}><X /></button>
+                            </div>
+
+                            <div className="space-y-4 flex-1">
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 mb-1">장소 별칭 (Title)</label>
+                                    <input 
+                                        className="w-full border rounded-lg p-2" 
+                                        value={currentStop.title}
+                                        onChange={e => setCurrentStop({...currentStop, title: e.target.value})}
+                                        placeholder="예: 파리 에펠탑에서의 저녁"
+                                    />
+                                </div>
+                                <div className="grid grid-cols-2 gap-4">
+                                    <div>
+                                        <label className="block text-sm font-medium text-gray-700 mb-1">지역명</label>
+                                        <input 
+                                            className="w-full border rounded-lg p-2" 
+                                            value={currentStop.locationName}
+                                            onChange={e => setCurrentStop({...currentStop, locationName: e.target.value})}
+                                            placeholder="예: Paris, France"
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm font-medium text-gray-700 mb-1">이동 수단(여기까지)</label>
+                                        <select 
+                                            className="w-full border rounded-lg p-2"
+                                            value={currentStop.transportMode}
+                                            onChange={e => setCurrentStop({...currentStop, transportMode: e.target.value as TransportMode})}
+                                        >
+                                            {Object.values(TransportMode).map(m => (
+                                                <option key={m} value={m}>{m}</option>
+                                            ))}
+                                        </select>
+                                    </div>
+                                </div>
+
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 mb-1">이야기 & 메모</label>
+                                    <div className="relative">
+                                        <textarea 
+                                            className="w-full border rounded-lg p-3 pr-10 h-32 resize-none" 
+                                            value={currentStop.description}
+                                            onChange={e => setCurrentStop({...currentStop, description: e.target.value})}
+                                            placeholder="여행의 순간을 기록하세요..."
+                                        />
+                                        <button 
+                                            onClick={handleAiEnhance}
+                                            disabled={isAiLoading}
+                                            className="absolute bottom-3 right-3 p-2 bg-indigo-100 rounded-full text-indigo-600 hover:bg-indigo-200 transition-colors"
+                                            title="AI로 글 다듬기"
+                                        >
+                                            {isAiLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wand2 className="w-4 h-4" />}
+                                        </button>
+                                    </div>
+                                </div>
+
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 mb-1">사진 등록</label>
+                                    <div className="space-y-3">
+                                        <input 
+                                            type="text" 
+                                            placeholder="이미지 URL 입력 (https://...)" 
+                                            value={stopImageUrl}
+                                            onChange={(e) => setStopImageUrl(e.target.value)}
+                                            className="w-full border rounded-lg p-2 text-sm"
+                                        />
+                                        <div className="text-center text-xs text-gray-400">또는</div>
+                                        <input 
+                                            type="file" 
+                                            accept="image/*"
+                                            onChange={e => setStopImageFile(e.target.files ? e.target.files[0] : null)}
+                                            className="w-full text-sm text-gray-500
+                                            file:mr-4 file:py-2 file:px-4
+                                            file:rounded-full file:border-0
+                                            file:text-sm file:font-semibold
+                                            file:bg-indigo-50 file:text-indigo-700
+                                            hover:file:bg-indigo-100"
+                                        />
+                                    </div>
+                                    {(stopImageUrl || stopImageFile) && (
+                                        <div className="mt-2 h-20 w-20 rounded-lg overflow-hidden bg-gray-100 border relative">
+                                            {stopImageFile ? (
+                                                <div className="w-full h-full flex items-center justify-center text-xs text-gray-500">File Selected</div>
+                                            ) : (
+                                                <img src={stopImageUrl} alt="Preview" className="w-full h-full object-cover" />
+                                            )}
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+
+                            <button 
+                                onClick={handleAddStop}
+                                className="mt-6 w-full bg-black text-white py-3 rounded-lg font-bold hover:bg-gray-800"
+                            >
+                                이 장소 추가하기
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
-      </div>
-    </div>
-  );
+    );
 };
-
-// Helper Icon
-const ClockIcon = ({size, className}: {size:number, className?:string}) => (
-    <svg xmlns="http://www.w3.org/2000/svg" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-);
 
 export default TripEditor;

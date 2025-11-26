@@ -1,5 +1,5 @@
 {
-  "name": "tripflow---dynamic-travel-map",
+  "name": "travellog-ai---dynamic-world-map",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -11,8 +11,11 @@
   "dependencies": {
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
-    "lucide-react": "^0.554.0",
-    "firebase": "^12.6.0"
+    "firebase": "^12.6.0",
+    "@google/genai": "^1.30.0",
+    "lucide-react": "^0.555.0",
+    "react-leaflet": "^5.0.0",
+    "leaflet": "^1.9.4"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",

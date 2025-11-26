@@ -1,6 +1,6 @@
 {
-  "name": "TripFlow - Dynamic Travel Map",
-  "description": "A storytelling travel map where scrolling animates your journey along the path.",
+  "name": "TravelLog AI - Dynamic World Map",
+  "description": "A world-class travel log application where users map their journeys. Features scrolling-based dynamic trajectory animation, Firebase authentication/storage, and Gemini AI-powered story enhancement.",
   "requestFramePermissions": [
     "geolocation"
   ]
