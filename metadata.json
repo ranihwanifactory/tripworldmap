@@ -1,0 +1,7 @@
+{
+  "name": "TravelLog AI - Dynamic World Map",
+  "description": "A world-class travel log application where users map their journeys. Features scrolling-based dynamic trajectory animation, Firebase authentication/storage, and Gemini AI-powered story enhancement.",
+  "requestFramePermissions": [
+    "geolocation"
+  ]
+}
