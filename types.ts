@@ -47,3 +47,13 @@ export interface UserProfile {
   email: string | null;
   photoURL: string | null;
 }
+
+export interface Comment {
+  id: string;
+  userId: string;
+  userName: string;
+  text: string;
+  rating: number; // 1-5
+  createdAt: Timestamp;
+  updatedAt?: Timestamp;
+}

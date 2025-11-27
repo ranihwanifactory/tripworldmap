@@ -1,8 +1,11 @@
 import React, { useEffect, useRef, useState, useMemo } from 'react';
 import { MapContainer, TileLayer, Marker, Polyline, useMap, ZoomControl } from 'react-leaflet';
 import L from 'leaflet';
-import { Trip, TravelStop, TransportMode } from '../types';
-import { ArrowLeft, Calendar, MapPin, Compass, Navigation, Plane, Car, Train, Ship, Bike, Footprints, Bus, AlertCircle } from 'lucide-react';
+import { Trip, TravelStop, TransportMode, Comment } from '../types';
+import { ArrowLeft, Calendar, MapPin, Compass, Navigation, Plane, Car, Train, Ship, Bike, Footprints, Bus, AlertCircle, Star, MessageSquare, Send, Trash2, Edit2, X } from 'lucide-react';
+import { collection, addDoc, query, orderBy, onSnapshot, deleteDoc, doc, updateDoc, Timestamp } from 'firebase/firestore';
+import { db } from '../firebase';
+import { User } from 'firebase/auth';
 
 // --- Assets & Icons ---
 
@@ -14,38 +17,26 @@ const HistoryDotIcon = L.divIcon({
     iconAnchor: [6, 6]
 });
 
-// Modern UX 3D Gradient Icons for Transport
+// Modern UX 3D Gradient Icons for Transport - EMOJI BASED for high fidelity without assets
 const getTransportIcon = (mode: TransportMode) => {
-    const colorMap = {
-        [TransportMode.FLIGHT]: 'from-sky-400 to-blue-600',
-        [TransportMode.CAR]: 'from-orange-400 to-red-600',
-        [TransportMode.TRAIN]: 'from-emerald-400 to-green-600',
-        [TransportMode.BUS]: 'from-yellow-400 to-orange-500',
-        [TransportMode.SHIP]: 'from-cyan-400 to-blue-500',
-        [TransportMode.BICYCLE]: 'from-lime-400 to-green-500',
-        [TransportMode.WALK]: 'from-pink-400 to-rose-600',
+    const iconData = {
+        [TransportMode.FLIGHT]: { emoji: '✈️', color: 'from-sky-400 to-blue-600' },
+        [TransportMode.CAR]: { emoji: '🚗', color: 'from-orange-400 to-red-600' },
+        [TransportMode.TRAIN]: { emoji: '🚄', color: 'from-emerald-400 to-green-600' },
+        [TransportMode.BUS]: { emoji: '🚌', color: 'from-yellow-400 to-orange-500' },
+        [TransportMode.SHIP]: { emoji: '🚢', color: 'from-cyan-400 to-blue-500' },
+        [TransportMode.BICYCLE]: { emoji: '🚴', color: 'from-lime-400 to-green-500' },
+        [TransportMode.WALK]: { emoji: '🚶', color: 'from-pink-400 to-rose-600' },
     };
     
-    const bgClass = colorMap[mode] || 'from-indigo-400 to-purple-600';
+    const { emoji, color } = iconData[mode] || iconData[TransportMode.FLIGHT];
     
-    const iconSvgs = {
-        [TransportMode.FLIGHT]: `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12h20"/><path d="M13 2l9 10-9 10"/><path d="M2 12l5-5m0 10l-5-5"/></svg>`,
-        [TransportMode.CAR]: `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 17h2c.6 0 1-.4 1-1v-3c0-.9-.7-1.7-1.5-1.9C18.7 10.6 16 10 16 10s-1.3-1.4-2.2-2.3c-.5-.4-1.1-.7-1.8-.7H5c-.6 0-1.1.4-1.4.9l-1.4 2.9A3.7 3.7 0 0 0 2 12v4c0 .6.4 1 1 1h2"/><circle cx="7" cy="17" r="2"/><path d="M9 17h6"/><circle cx="17" cy="17" r="2"/></svg>`,
-        [TransportMode.TRAIN]: `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="3" width="16" height="16" rx="2"/><path d="M4 11h16"/><path d="M12 3v8"/><path d="m8 19-2 3"/><path d="m18 22-2-3"/></svg>`,
-        [TransportMode.SHIP]: `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 21c.6.5 1.2 1 2.5 1 2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1 .6.5 1.2 1 2.5 1 2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1"/><path d="M19.38 20A11.6 11.6 0 0 0 21 14l-9-4-9 4c0 2.9.9 5.8 2.38 8"/><path d="M12 10v4"/><path d="M12 2v3"/></svg>`,
-        [TransportMode.BUS]: `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6v6"/><path d="M15 6v6"/><path d="M2 12h19.6"/><path d="M18 18h3s.5-1.7.8-2.8c.1-.4.2-.8.2-1.2 0-.4-.1-.8-.2-1.2l-1.4-5C20.1 6.8 19.1 6 18 6H4a2 2 0 0 0-2 2v10h3"/><circle cx="7" cy="18" r="2"/><path d="M9 18h5"/><circle cx="18" cy="18" r="2"/></svg>`,
-        [TransportMode.BICYCLE]: `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="5.5" cy="17.5" r="3.5"/><circle cx="18.5" cy="17.5" r="3.5"/><path d="M15 6a1 1 0 1 0 0-2 1 1 0 0 0 0 2zm-3 11.5V14l-3-3 4-3 2 3h2"/></svg>`,
-        [TransportMode.WALK]: `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 16v-2.38C4 11.5 2.97 10.5 3 8c.03-2.72 1.49-6 4.5-6C9.37 2 11 3.8 11 8c0 1.25-.38 2.5-1 3.75"/><path d="M5.5 14h11c1.57 0 2.5 1.93 1.63 3.32L17 19"/><path d="M13 13v-3"/><path d="M8 16v-2"/></svg>`
-    };
-
-    const selectedIconSvg = iconSvgs[mode] || iconSvgs[TransportMode.FLIGHT];
-
     return L.divIcon({
         html: `
         <div class="relative group">
             <div class="absolute inset-0 bg-white rounded-full blur-md opacity-40 animate-pulse"></div>
-            <div class="relative w-14 h-14 bg-gradient-to-br ${bgClass} rounded-full flex items-center justify-center shadow-xl border-[3px] border-white transform transition-transform duration-300">
-                 ${selectedIconSvg}
+            <div class="relative w-14 h-14 bg-gradient-to-br ${color} rounded-full flex items-center justify-center shadow-xl border-[3px] border-white transform transition-transform duration-300 hover:scale-110">
+                 <span class="text-3xl filter drop-shadow-md grayscale-0">${emoji}</span>
             </div>
             <div class="absolute -bottom-2 left-1/2 transform -translate-x-1/2 w-8 h-1 bg-black/50 blur-sm rounded-full"></div>
         </div>`,
@@ -58,6 +49,7 @@ const getTransportIcon = (mode: TransportMode) => {
 interface StoryMapProps {
     trip: Trip;
     stops: TravelStop[];
+    currentUser: User | null;
     onBack: () => void;
 }
 
@@ -84,13 +76,20 @@ const UIIcon = ({ mode }: { mode: TransportMode }) => {
     }
 }
 
-const StoryMap: React.FC<StoryMapProps> = ({ trip, stops, onBack }) => {
+const StoryMap: React.FC<StoryMapProps> = ({ trip, stops, currentUser, onBack }) => {
     const [activeStopIndex, setActiveStopIndex] = useState(0);
     const [vehiclePos, setVehiclePos] = useState<[number, number] | null>(null);
     const [activeTransportMode, setActiveTransportMode] = useState<TransportMode>(TransportMode.FLIGHT);
     const [simulatedSpeed, setSimulatedSpeed] = useState(0);
 
+    // Comments State
+    const [comments, setComments] = useState<Comment[]>([]);
+    const [newComment, setNewComment] = useState('');
+    const [rating, setRating] = useState(5);
+    const [editingCommentId, setEditingCommentId] = useState<string | null>(null);
+
     const containerRef = useRef<HTMLDivElement>(null);
+    const commentsEndRef = useRef<HTMLDivElement>(null);
     
     // Safety: ensure stops exist and handle potential data issues
     const sortedStops = useMemo(() => {
@@ -104,6 +103,61 @@ const StoryMap: React.FC<StoryMapProps> = ({ trip, stops, onBack }) => {
             setActiveTransportMode(sortedStops[0].transportMode);
         }
     }, [sortedStops]);
+
+    // Fetch Comments
+    useEffect(() => {
+        const q = query(collection(db, `trips/${trip.id}/comments`), orderBy('createdAt', 'desc'));
+        const unsubscribe = onSnapshot(q, (snapshot) => {
+            const msgs = snapshot.docs.map(doc => ({
+                id: doc.id,
+                ...doc.data()
+            } as Comment));
+            setComments(msgs);
+        });
+        return () => unsubscribe();
+    }, [trip.id]);
+
+    const handlePostComment = async () => {
+        if (!currentUser) return alert('로그인이 필요합니다.');
+        if (!newComment.trim()) return;
+
+        try {
+            if (editingCommentId) {
+                await updateDoc(doc(db, `trips/${trip.id}/comments`, editingCommentId), {
+                    text: newComment,
+                    rating: rating,
+                    updatedAt: Timestamp.now()
+                });
+                setEditingCommentId(null);
+            } else {
+                await addDoc(collection(db, `trips/${trip.id}/comments`), {
+                    userId: currentUser.uid,
+                    userName: currentUser.displayName || currentUser.email?.split('@')[0] || '익명',
+                    text: newComment,
+                    rating: rating,
+                    createdAt: Timestamp.now()
+                });
+            }
+            setNewComment('');
+            setRating(5);
+        } catch (e) {
+            console.error(e);
+            alert("댓글 저장 실패");
+        }
+    };
+
+    const handleDeleteComment = async (id: string) => {
+        if(!window.confirm("삭제하시겠습니까?")) return;
+        await deleteDoc(doc(db, `trips/${trip.id}/comments`, id));
+    };
+
+    const handleStartEdit = (comment: Comment) => {
+        setNewComment(comment.text);
+        setRating(comment.rating);
+        setEditingCommentId(comment.id);
+        // Scroll to form (simple logic)
+        commentsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    };
 
     // Scroll Logic
     useEffect(() => {
@@ -157,7 +211,6 @@ const StoryMap: React.FC<StoryMapProps> = ({ trip, stops, onBack }) => {
             if (!foundActive) {
                  const lastIdx = cards.length - 1;
                  const lastCardRect = cards[lastIdx].getBoundingClientRect();
-                 // If the last card is near center or above
                  if (lastCardRect.top <= containerHeight / 2) {
                      setActiveStopIndex(lastIdx);
                      setVehiclePos([sortedStops[lastIdx].coordinates.lat, sortedStops[lastIdx].coordinates.lng]);
@@ -185,23 +238,18 @@ const StoryMap: React.FC<StoryMapProps> = ({ trip, stops, onBack }) => {
             <div className="w-full h-screen bg-slate-900 flex flex-col items-center justify-center text-white">
                 <AlertCircle className="w-16 h-16 text-gray-600 mb-4" />
                 <h2 className="text-2xl font-serif">여행 경로가 없습니다.</h2>
-                <p className="text-gray-400 mt-2 mb-8">아직 등록된 여행지가 없습니다.</p>
-                <button 
-                    onClick={onBack}
-                    className="px-6 py-2 bg-white text-black rounded-full font-bold hover:bg-gray-200"
-                >
+                <button onClick={onBack} className="mt-8 px-6 py-2 bg-white text-black rounded-full font-bold hover:bg-gray-200">
                     돌아가기
                 </button>
             </div>
         );
     }
 
-    // Safe access
     const currentStop = sortedStops[activeStopIndex] || sortedStops[0];
     const initialCenter: [number, number] = [currentStop.coordinates.lat, currentStop.coordinates.lng];
 
     return (
-        <div className="relative w-full h-screen overflow-hidden flex flex-col md:flex-row bg-slate-900 font-sans text-white">
+        <div className="relative w-full h-screen overflow-hidden flex bg-slate-900 font-sans text-white">
             {/* Map Background - Full Screen */}
             <div className="absolute inset-0 z-0 h-full w-full">
                 <MapContainer 
@@ -219,13 +267,11 @@ const StoryMap: React.FC<StoryMapProps> = ({ trip, stops, onBack }) => {
                     />
                     <ZoomControl position="bottomright" />
                     
-                    {/* Trajectory */}
                     <Polyline 
                         positions={sortedStops.map(s => [s.coordinates.lat, s.coordinates.lng])}
                         pathOptions={{ color: '#fff', weight: 2, opacity: 0.3, dashArray: '5, 10' }}
                     />
 
-                    {/* History Dots */}
                     {sortedStops.map((stop, idx) => (
                         <Marker 
                             key={stop.id} 
@@ -235,7 +281,6 @@ const StoryMap: React.FC<StoryMapProps> = ({ trip, stops, onBack }) => {
                         />
                     ))}
 
-                    {/* Active Vehicle */}
                     {vehiclePos && (
                         <Marker 
                             position={vehiclePos} 
@@ -248,26 +293,6 @@ const StoryMap: React.FC<StoryMapProps> = ({ trip, stops, onBack }) => {
                 </MapContainer>
             </div>
 
-            {/* --- Modern HUD Overlay (Top Right) --- */}
-            <div className="absolute top-6 right-6 z-30 flex flex-col items-end pointer-events-none">
-                <div className="bg-black/20 backdrop-blur-xl border border-white/10 rounded-full px-6 py-3 text-white shadow-2xl flex items-center space-x-6">
-                    <div className="flex items-center space-x-2">
-                        <span className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse"></span>
-                        <span className="text-xs font-mono text-gray-300 uppercase tracking-widest">Live Tracking</span>
-                    </div>
-                    <div className="h-4 w-px bg-white/20"></div>
-                    <div className="flex items-baseline space-x-1">
-                        <span className="text-xl font-bold font-mono text-emerald-400">{simulatedSpeed}</span>
-                        <span className="text-[10px] text-gray-500 font-mono">km/h</span>
-                    </div>
-                    <div className="h-4 w-px bg-white/20"></div>
-                     <div className="flex items-center text-gray-300">
-                        <Compass className="w-4 h-4 mr-2" />
-                        <span className="font-mono text-xs">{activeStopIndex + 1}/{sortedStops.length}</span>
-                    </div>
-                </div>
-            </div>
-
             {/* --- Navigation Bar (Top Left) --- */}
             <div className="absolute top-6 left-6 z-30 flex items-center space-x-4 pointer-events-none">
                 <button onClick={onBack} className="pointer-events-auto bg-white/10 hover:bg-white/20 backdrop-blur-md border border-white/10 rounded-full p-3 text-white transition-all hover:scale-105 shadow-lg">
@@ -278,101 +303,174 @@ const StoryMap: React.FC<StoryMapProps> = ({ trip, stops, onBack }) => {
                 </h1>
             </div>
 
-            {/* --- Magazine Content Stream (Left Side Overlay) --- */}
-            <div 
-                ref={containerRef}
-                className="absolute top-0 left-0 h-full w-full md:w-[480px] z-20 overflow-y-auto no-scrollbar scroll-smooth snap-y snap-mandatory bg-gradient-to-r from-black/80 via-black/40 to-transparent pointer-events-auto"
-            >
-                {/* Intro Card */}
-                <div className="h-[50vh] w-full flex flex-col justify-end p-8 md:p-12 snap-start">
-                    <div className="animate-fade-in-up">
-                        <span className="inline-block px-3 py-1 bg-white/20 backdrop-blur text-xs font-bold tracking-widest text-white uppercase mb-4 rounded-sm">
-                            Travel Journal
-                        </span>
-                        <h1 className="text-5xl md:text-6xl font-serif text-white leading-tight mb-4 drop-shadow-xl">
-                            {trip.title}
-                        </h1>
-                        <p className="text-gray-300 text-lg font-light leading-relaxed max-w-sm border-l-2 border-white/30 pl-4 bg-black/20 p-2 rounded-r">
-                            {trip.description}
-                        </p>
-                        <div className="mt-8 flex items-center text-sm text-gray-400">
-                             <span className="animate-bounce mr-2">↓</span> Scroll to explore
-                        </div>
+             {/* --- Modern HUD Overlay (Top Right) --- */}
+             <div className="absolute top-6 right-6 z-30 flex flex-col items-end pointer-events-none">
+                <div className="bg-black/20 backdrop-blur-xl border border-white/10 rounded-full px-6 py-3 text-white shadow-2xl flex items-center space-x-6">
+                    <div className="flex items-center space-x-2">
+                        <span className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse"></span>
+                        <span className="text-xs font-mono text-gray-300 uppercase tracking-widest">Live</span>
+                    </div>
+                    <div className="h-4 w-px bg-white/20"></div>
+                    <div className="flex items-baseline space-x-1">
+                        <span className="text-xl font-bold font-mono text-emerald-400">{simulatedSpeed}</span>
+                        <span className="text-[10px] text-gray-500 font-mono">km/h</span>
                     </div>
                 </div>
+            </div>
 
-                {/* Magazine Story Cards */}
+            {/* --- Centered Magazine Stream --- */}
+            <div 
+                ref={containerRef}
+                className="absolute inset-0 z-20 overflow-y-auto no-scrollbar scroll-smooth snap-y snap-mandatory bg-transparent pointer-events-auto"
+            >
+                {/* Space before first card to show full map */}
+                <div className="h-[50vh] w-full snap-start flex items-center justify-center pointer-events-none">
+                     <div className="text-center p-8 bg-black/30 backdrop-blur-sm rounded-xl border border-white/5 pointer-events-auto max-w-md mx-auto">
+                        <span className="text-xs font-bold tracking-[0.3em] text-emerald-400 uppercase">Travel Log</span>
+                        <h1 className="text-4xl md:text-5xl font-serif text-white mt-4 mb-2 shadow-black drop-shadow-lg">{trip.title}</h1>
+                        <p className="text-gray-200 font-light">{trip.description}</p>
+                        <div className="mt-8 animate-bounce text-emerald-400">Scroll Down</div>
+                     </div>
+                </div>
+
+                {/* Cards */}
                 {sortedStops.map((stop, index) => (
                     <div 
                         key={stop.id} 
-                        className="magazine-card snap-center w-full min-h-screen flex items-center p-4 md:p-8"
+                        className="magazine-card snap-center w-full min-h-screen flex items-center justify-center p-4 pointer-events-none"
                     >
+                        {/* Compact Card */}
                         <div className={`
-                            w-full bg-black/60 backdrop-blur-xl border border-white/10 rounded-lg overflow-hidden shadow-2xl
+                            w-full max-w-md bg-black/70 backdrop-blur-xl border border-white/10 rounded-2xl overflow-hidden shadow-2xl pointer-events-auto
                             transition-all duration-700 ease-out transform
-                            ${index === activeStopIndex ? 'opacity-100 translate-x-0 scale-100' : 'opacity-30 -translate-x-8 scale-95'}
+                            ${index === activeStopIndex ? 'opacity-100 translate-y-0 scale-100' : 'opacity-40 translate-y-12 scale-95'}
                         `}>
-                            {/* Image Header */}
                             {stop.imageUrl && (
-                                <div className="h-64 w-full relative overflow-hidden">
-                                    <img src={stop.imageUrl} alt={stop.title} className="w-full h-full object-cover" />
-                                    <div className="absolute inset-0 bg-gradient-to-t from-black via-transparent to-transparent"></div>
-                                    <div className="absolute top-4 left-4 bg-black/50 backdrop-blur px-3 py-1 rounded text-white text-xs font-bold flex items-center uppercase tracking-widest border border-white/10">
-                                        <div className="mr-2 text-emerald-400">
-                                            <UIIcon mode={stop.transportMode} />
-                                        </div>
-                                        {stop.transportMode} Arrival
+                                <div className="h-48 w-full relative overflow-hidden group">
+                                    <img src={stop.imageUrl} alt={stop.title} className="w-full h-full object-cover transition-transform duration-1000 group-hover:scale-110" />
+                                    <div className="absolute top-3 left-3 bg-black/60 px-2 py-1 rounded text-[10px] font-bold uppercase tracking-widest text-emerald-400 flex items-center border border-white/10">
+                                        <div className="mr-1"><UIIcon mode={stop.transportMode} /></div>
+                                        {stop.transportMode}
                                     </div>
-                                    {/* Stop Number Badge */}
-                                    <div className="absolute -bottom-6 right-8 text-8xl font-serif text-white/10 font-black pointer-events-none select-none z-0">
+                                    <div className="absolute -bottom-4 -right-2 text-6xl font-serif text-white/10 font-black pointer-events-none">
                                         {index + 1}
                                     </div>
                                 </div>
                             )}
 
-                            {/* Content Body */}
-                            <div className="p-8 relative z-10">
-                                <div className="flex items-center space-x-2 text-emerald-400 text-xs font-bold uppercase tracking-widest mb-3">
+                            <div className="p-6">
+                                <div className="flex items-center space-x-2 text-emerald-400 text-[10px] font-bold uppercase tracking-widest mb-2">
                                     <MapPin className="w-3 h-3" />
                                     <span>{stop.locationName}</span>
                                 </div>
-                                
-                                <h2 className="text-3xl font-serif text-white mb-6 leading-tight">
-                                    {stop.title}
-                                </h2>
-                                
-                                <div className="prose prose-invert prose-p:text-gray-300 prose-p:font-light prose-p:leading-loose">
-                                    <p>
-                                        <span className="text-4xl float-left mr-2 mt-[-10px] font-serif text-emerald-500">{stop.description.charAt(0)}</span>
-                                        {stop.description.slice(1)}
-                                    </p>
-                                </div>
-                                
-                                <div className="mt-8 pt-6 border-t border-white/10 flex justify-between items-center text-xs text-gray-500 font-mono">
+                                <h2 className="text-2xl font-serif text-white mb-3">{stop.title}</h2>
+                                <p className="text-gray-300 text-sm leading-relaxed font-light">{stop.description}</p>
+                                <div className="mt-4 pt-4 border-t border-white/10 flex justify-between items-center text-[10px] text-gray-500 font-mono">
                                     <div className="flex items-center">
-                                        <Calendar className="w-3 h-3 mr-2" />
+                                        <Calendar className="w-3 h-3 mr-1" />
                                         {(stop.arrivalDate as any).toDate ? (stop.arrivalDate as any).toDate().toLocaleDateString() : new Date(stop.arrivalDate as any).toLocaleDateString()}
                                     </div>
-                                    <div className="text-right max-w-[50%] truncate">
-                                        {stop.address}
-                                    </div>
+                                    <div className="truncate max-w-[150px]">{stop.address}</div>
                                 </div>
                             </div>
                         </div>
                     </div>
                 ))}
                 
-                {/* Outro */}
-                <div className="h-[50vh] w-full flex items-center justify-center p-12 snap-end">
-                    <div className="text-center">
-                        <div className="inline-block p-4 rounded-full bg-white/10 backdrop-blur-md mb-4 border border-white/10">
-                            <Footprints className="w-8 h-8 text-emerald-400" />
+                {/* --- Review & Comments Section --- */}
+                <div className="min-h-screen w-full flex items-center justify-center p-4 snap-start bg-black/80 backdrop-blur-md">
+                    <div className="w-full max-w-lg bg-white/5 border border-white/10 rounded-2xl p-6 overflow-hidden flex flex-col max-h-[80vh]">
+                        <div className="flex items-center justify-between mb-6">
+                            <h2 className="text-2xl font-serif text-white flex items-center">
+                                <MessageSquare className="w-5 h-5 mr-2 text-emerald-400" />
+                                여행자 리뷰 <span className="text-sm text-gray-500 ml-2 font-sans">({comments.length})</span>
+                            </h2>
                         </div>
-                        <h2 className="text-2xl font-serif text-white mb-2">Journey Completed</h2>
-                        <p className="text-gray-400">Thank you for watching.</p>
-                        <button onClick={onBack} className="mt-8 text-emerald-400 hover:text-emerald-300 text-sm font-bold uppercase tracking-widest hover:underline">
-                            Back to Dashboard
-                        </button>
+
+                        {/* Comment List */}
+                        <div className="flex-1 overflow-y-auto space-y-4 pr-2 mb-6 custom-scrollbar">
+                            {comments.length === 0 ? (
+                                <div className="text-center py-10 text-gray-500">
+                                    첫 번째 리뷰를 남겨보세요!
+                                </div>
+                            ) : (
+                                comments.map(comment => (
+                                    <div key={comment.id} className="bg-white/5 rounded-lg p-4 hover:bg-white/10 transition-colors">
+                                        <div className="flex justify-between items-start mb-2">
+                                            <div className="flex items-center">
+                                                <div className="w-8 h-8 rounded-full bg-gradient-to-br from-indigo-500 to-purple-500 flex items-center justify-center text-xs font-bold mr-3">
+                                                    {comment.userName.charAt(0)}
+                                                </div>
+                                                <div>
+                                                    <div className="text-sm font-bold text-white">{comment.userName}</div>
+                                                    <div className="flex text-yellow-400 text-xs">
+                                                        {[...Array(5)].map((_, i) => (
+                                                            <Star key={i} className={`w-3 h-3 ${i < comment.rating ? 'fill-current' : 'text-gray-600 fill-none'}`} />
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            </div>
+                                            {currentUser && currentUser.uid === comment.userId && (
+                                                <div className="flex space-x-2">
+                                                    <button onClick={() => handleStartEdit(comment)} className="text-gray-400 hover:text-emerald-400"><Edit2 className="w-3 h-3" /></button>
+                                                    <button onClick={() => handleDeleteComment(comment.id)} className="text-gray-400 hover:text-red-400"><Trash2 className="w-3 h-3" /></button>
+                                                </div>
+                                            )}
+                                        </div>
+                                        <p className="text-gray-300 text-sm">{comment.text}</p>
+                                        <div className="text-[10px] text-gray-600 mt-2">
+                                            {comment.createdAt?.seconds ? new Date(comment.createdAt.seconds * 1000).toLocaleDateString() : 'Just now'}
+                                            {comment.updatedAt && ' (수정됨)'}
+                                        </div>
+                                    </div>
+                                ))
+                            )}
+                            <div ref={commentsEndRef}></div>
+                        </div>
+
+                        {/* Comment Form */}
+                        {currentUser ? (
+                            <div className="bg-white/5 rounded-xl p-4 border border-white/10">
+                                {editingCommentId && (
+                                    <div className="flex justify-between text-xs text-emerald-400 mb-2">
+                                        <span>댓글 수정 중...</span>
+                                        <button onClick={() => { setEditingCommentId(null); setNewComment(''); }}><X className="w-3 h-3" /></button>
+                                    </div>
+                                )}
+                                <div className="flex items-center mb-3">
+                                    <span className="text-xs text-gray-400 mr-2">별점:</span>
+                                    <div className="flex space-x-1 cursor-pointer">
+                                        {[1, 2, 3, 4, 5].map((star) => (
+                                            <Star 
+                                                key={star} 
+                                                className={`w-5 h-5 ${star <= rating ? 'text-yellow-400 fill-current' : 'text-gray-600'}`}
+                                                onClick={() => setRating(star)}
+                                            />
+                                        ))}
+                                    </div>
+                                </div>
+                                <div className="flex gap-2">
+                                    <input 
+                                        type="text" 
+                                        className="flex-1 bg-black/30 border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-emerald-500"
+                                        placeholder="여행에 대한 소감을 남겨주세요..."
+                                        value={newComment}
+                                        onChange={(e) => setNewComment(e.target.value)}
+                                        onKeyPress={(e) => e.key === 'Enter' && handlePostComment()}
+                                    />
+                                    <button 
+                                        onClick={handlePostComment}
+                                        className="bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg p-2 transition-colors"
+                                    >
+                                        <Send className="w-4 h-4" />
+                                    </button>
+                                </div>
+                            </div>
+                        ) : (
+                            <div className="text-center p-4 bg-white/5 rounded-xl">
+                                <p className="text-sm text-gray-400 mb-2">리뷰를 남기려면 로그인이 필요합니다.</p>
+                            </div>
+                        )}
                     </div>
                 </div>
             </div>

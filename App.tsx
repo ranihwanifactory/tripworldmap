@@ -149,7 +149,7 @@ function App() {
 
   // View: Story Map
   if (view === 'STORY' && selectedTrip) {
-    return <StoryMap trip={selectedTrip} stops={selectedStops} onBack={() => setView('DASHBOARD')} />;
+    return <StoryMap trip={selectedTrip} stops={selectedStops} onBack={() => setView('DASHBOARD')} currentUser={user} />;
   }
 
   // View: Editor (Create or Edit)
